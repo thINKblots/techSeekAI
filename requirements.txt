@@ -27,7 +27,6 @@ click==8.1.7
 colorama==0.4.6
 contourpy==1.2.1
 cycler==0.12.1
-Cython==3.1.4
 dataclasses-json==0.6.7
 dill==0.4.0
 distlib==0.4.0
