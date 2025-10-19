@@ -1,1 +1,2 @@
 10/19/25 - requirements changes = Cython==3.1.4 >>> Cython<3.0
+10/19/25 - pip freeze requirements changes == rewritten
