@@ -28,7 +28,7 @@ def stream_chat(chat_messages):
         # Use the Groq client to stream responses
         stream = client.chat.completions.create(
             # The model name for Llama 3 70B on Groq
-            model="llama3-70b-8192", 
+            model="llama-3.3-70b-versatile", 
             messages=chat_messages,
             stream=True,
         )
@@ -133,4 +133,3 @@ if user_question := st.chat_input("Ask me a question..."):
         full_response = st.write_stream(stream_chat(messages_for_model))
 
     st.session_state.messages.append({"role": "assistant", "content": full_response})
-    st.rerun()
