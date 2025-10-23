@@ -2,6 +2,11 @@ import streamlit as st
 import streamlit.components.v1 as components
 from ollama import Client, ResponseError
 
+# ---RAG DEPENDENCIES---
+from langchain_community.vectorstores import Chroma # 👈 CHANGED
+from langchain_community.embeddings import HuggingFaceEmbeddings
+import os
+
 # --- APP CONFIGURATION ---
 st.set_page_config(page_title="TechSeek AI Agent", page_icon="🤖", layout="centered")
 st.title("🤖 TechSeek AI Agent")
@@ -10,7 +15,8 @@ st.title("🤖 TechSeek AI Agent")
 BASE_SYSTEM_PROMPT = """
 You are a senior equipment service advisor for a large equipment rental company and you've been tasked with training and supporting junior-level service technicians. 
 Keep your responses concise and under 150 words. Break your responses into steps but require user input between each step and ask the user clarifying questions or follow-ups at each step as necessary when walking through diagnostics. 
-Respond to the topic at a high school reading level. When possible, cite all primary sources for the information you provide. If you are unsure about an answer, respond with "I'm not sure about that. Let me look into it further." and avoid making up information.
+Respond to the topic at a high school reading level. When possible, cite all primary sources for the information you provide.
+If you are unsure about an answer, respond with "I'm not sure about that. Let me look into it further." and avoid making up information.
 """
 
 # --- OLLAMA CLIENT INITIALIZATION ---
@@ -19,6 +25,35 @@ try:
 except Exception as e:
     st.error(f"Failed to connect to Ollama. Is the Ollama server running? Error: {e}")
     st.stop()
+
+# ---LOADING THE INDEX---
+INDEX_PATH = "chroma_index" # 👈 CHANGED from FAISS
+
+@st.cache_resource
+def load_retriever():
+    """
+    Loads the pre-built ChromaDB index from disk and creates a retriever.
+    Caches the retriever to avoid reloading on every interaction.
+    """
+    if not os.path.exists(INDEX_PATH):
+        st.error(f"ChromaDB index not found at '{INDEX_PATH}'. Please run `build_index.py` first.")
+        return None
+    
+    try:
+        print("Loading ChromaDB index...")
+        embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
+        
+        # Load the persisted database from disk
+        vector_store = Chroma(
+            persist_directory=INDEX_PATH, 
+            embedding_function=embeddings
+        )
+        
+        print("ChromaDB index loaded successfully.")
+        return vector_store.as_retriever()
+    except Exception as e:
+        st.error(f"Failed to load the ChromaDB index. Error: {e}")
+        return None
 
 # --- HELPER FUNCTIONS ---
 def stream_chat(chat_messages):
@@ -55,12 +90,23 @@ if "model" not in st.session_state:
     st.session_state.model = ""
 if "serial_number" not in st.session_state:
     st.session_state.serial_number = ""
+if "retriever" not in st.session_state:
+    st.session_state.retriever = load_retriever()
 
 # --- SIDEBAR UI ---
 st.sidebar.title("Device Information")
 st.session_state.make = st.sidebar.text_input("Make", value=st.session_state.make)
 st.session_state.model = st.sidebar.text_input("Model", value=st.session_state.model)
 st.session_state.serial_number = st.sidebar.text_input("Serial Number", value=st.session_state.serial_number)
+
+st.sidebar.title("Actions")
+
+# ---KNOWLEDGE BASE---
+st.sidebar.title("📚 Knowledge Base")
+if st.session_state.retriever:
+    st.sidebar.success("Knowledge base loaded successfully.")
+else:
+    st.sidebar.error("Knowledge base not loaded. Please build the index.")
 
 st.sidebar.title("Actions")
 

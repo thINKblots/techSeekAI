@@ -1,28 +1,24 @@
 # build_index.py
 
 import os
+# This should be at the top.
+os.environ['TOKENIZERS_PARALLELISM'] = 'false'
+
 import glob
+import multiprocessing # 👈 IMPORT THIS
 from langchain_community.document_loaders import PyMuPDFLoader
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain_community.vectorstores import FAISS
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_community.vectorstores import Chroma
 from langchain_community.embeddings import HuggingFaceEmbeddings
 
 # --- Configuration ---
-# 1. Path to the directory containing your PDF files
 PDFS_PATH = "OEM_manuals/" 
+INDEX_PATH = "chroma_index"
 
-# 2. Path where you want to save the FAISS index
-INDEX_PATH = "faiss_index"
-
-# --- Main Indexing Logic ---
-def create_index():
-    """
-    This function builds a FAISS vector store from PDF documents
-    and saves it to disk.
-    """
+def main():
+    """Main function to run the indexing process."""
     print("Starting the indexing process...")
 
-    # Load all PDF files from the specified path
     all_files = glob.glob(os.path.join(PDFS_PATH, "*.pdf"))
     if not all_files:
         print(f"No PDF files found in '{PDFS_PATH}'. Please check the path.")
@@ -30,7 +26,6 @@ def create_index():
         
     print(f"Found {len(all_files)} PDF files to process.")
 
-    # Load the documents
     documents = []
     for file_path in all_files:
         try:
@@ -44,25 +39,27 @@ def create_index():
         print("Could not load any documents. Exiting.")
         return
 
-    # Split the documents into smaller, manageable chunks
     text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
     chunks = text_splitter.split_documents(documents)
     print(f"Split {len(documents)} documents into {len(chunks)} chunks.")
 
-    # Initialize the embedding model
     print("Loading embedding model...")
-    embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
+    embeddings = HuggingFaceEmbeddings(
+        model_name="all-MiniLM-L6-v2",
+        model_kwargs={'device': 'cpu'} 
+    )
 
-    # Create the FAISS vector store from the chunks
-    print("Creating FAISS index from document chunks...")
-    vector_store = FAISS.from_documents(chunks, embeddings)
-
-    # Save the FAISS index to disk
-    print(f"Saving FAISS index to '{INDEX_PATH}'...")
-    vector_store.save_local(INDEX_PATH)
+    print(f"Creating and persisting ChromaDB index to '{INDEX_PATH}'...")
+    Chroma.from_documents(
+        documents=chunks, 
+        embedding=embeddings, 
+        persist_directory=INDEX_PATH
+    )
 
     print("✅ Indexing complete and saved successfully!")
 
-
+# --- ❗️KEY CHANGE IS HERE ---
 if __name__ == "__main__":
-    create_index()
+    # Set the start method to 'spawn' to avoid multiprocessing deadlocks on macOS
+    multiprocessing.set_start_method('spawn', force=True)
+    main()
