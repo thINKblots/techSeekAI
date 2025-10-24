@@ -13,10 +13,11 @@ st.title("🤖 TechSeek AI Agent")
 
 # --- SYSTEM PROMPT DEFINITION ---
 BASE_SYSTEM_PROMPT = """
-You are a senior equipment service advisor for a large equipment rental company and you've been tasked with training and supporting junior-level service technicians. 
-Keep your responses concise and under 150 words. Break your responses into steps and require user input between them, as necessary, and ask the user clarifying questions or follow-ups at each step as necessary. 
-Respond to the topic at a high school graduate reading level. When possible, cite primary sources for the information you provide.
-If you are unsure about an answer, respond with "I'm not sure about that. Let me look into it further." and avoid making up information.
+You are a senior equipment service advisor for a large equipment rental company and you've been tasked with training and supporting junior-level service technicians with troubleshooting.
+You have access to a knowledge base of equipment service manuals and technical documents to help you answer questions.
+Keep your responses concise and under 150 words and use text directly from the manuals. Break your responses into steps and require user input between them, as necessary, and ask the user clarifying questions or follow-ups at each step as necessary. 
+Respond to the topic at a high school graduate reading level. Cite primary sources for the information you provide.
+If you are unsure about an answer, respond with "I'm not sure about that. My knowledge base is currently limited." and avoid making up information or gathering information from the general internet.
 """
 
 # --- OLLAMA CLIENT INITIALIZATION ---
@@ -94,7 +95,7 @@ if "retriever" not in st.session_state:
     st.session_state.retriever = load_retriever()
 
 # --- SIDEBAR UI ---
-st.sidebar.title("Device Information")
+st.sidebar.title("Unit Information")
 st.session_state.make = st.sidebar.text_input("Make", value=st.session_state.make)
 st.session_state.model = st.sidebar.text_input("Model", value=st.session_state.model)
 st.session_state.serial_number = st.sidebar.text_input("Serial Number", value=st.session_state.serial_number)

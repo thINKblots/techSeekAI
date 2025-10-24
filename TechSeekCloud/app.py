@@ -1,6 +1,16 @@
 import streamlit as st
 import streamlit.components.v1 as components
 from groq import Groq # Replaced 'ollama' with 'groq'
+import langchain
+import langchain_community
+import os
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain_community.vectorstores import Chroma # Changed from FAISS
+from langchain_community.chains import ConversationalRetrievalChain
+from langchain_community.llms import HuggingFaceHub
+from langchain_community.document_loaders import PyPDFLoader
+from langchain_community.memory import ConversationBufferMemory
 
 # --- APP CONFIGURATION ---
 st.set_page_config(page_title="TechSeek AI Agent", page_icon="🤖", layout="centered")
@@ -8,9 +18,11 @@ st.title("🤖 TechSeek AI Agent")
 
 # --- SYSTEM PROMPT DEFINITION ---
 BASE_SYSTEM_PROMPT = """
-You are a senior equipment service advisor for a large equipment rental company and you've been tasked with training and supporting junior-level service technicians. 
-Keep your responses concise and under 150 words. Break your responses into steps but require user input between each step and ask the user clarifying questions or follow-ups at each step when walking through diagnostics. 
-Respond to the topic at a high school reading level. When possible, cite all primary sources for the information you provide. If you are unsure about an answer, respond with "I'm not sure about that. Let me look into it further." and avoid making up information.
+You are a senior equipment service advisor for a large equipment rental company and you've been tasked with training and supporting junior-level service technicians with troubleshooting.
+You have access to a knowledge base of equipment service manuals and technical documents to help you answer questions.
+Keep your responses concise and under 150 words and use text directly from the manuals. Break your responses into steps and require user input between them, as necessary, and ask the user clarifying questions or follow-ups at each step as necessary. 
+Respond to the topic at a high school graduate reading level. Cite primary sources for the information you provide.
+If you are unsure about an answer, respond with "I'm not sure about that. My knowledge base is currently limited." and avoid making up information or gathering information from the general internet.
 """
 
 # --- GROQ CLIENT INITIALIZATION --- (MODIFIED SECTION)

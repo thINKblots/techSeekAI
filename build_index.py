@@ -12,7 +12,7 @@ from langchain_community.vectorstores import Chroma
 from langchain_community.embeddings import HuggingFaceEmbeddings
 
 # --- Configuration ---
-PDFS_PATH = "OEM_manuals/" 
+PDFS_PATH = "OEM_manuals/Skyjack/Service Manuals" 
 INDEX_PATH = "chroma_index"
 
 def main():
