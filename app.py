@@ -3,8 +3,8 @@ import streamlit.components.v1 as components
 from ollama import Client, ResponseError
 
 # ---RAG DEPENDENCIES---
-from langchain_community.vectorstores import Chroma # 👈 CHANGED
-from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain_community.vectorstores import Chroma
+from langchain_huggingface import HuggingFaceEmbeddings
 import os
 
 # --- APP CONFIGURATION ---
@@ -28,7 +28,7 @@ except Exception as e:
     st.stop()
 
 # ---LOADING THE INDEX---
-INDEX_PATH = "chroma_index" # 👈 CHANGED from FAISS
+INDEX_PATH = "chroma_index"
 
 @st.cache_resource
 def load_retriever():
@@ -37,49 +37,32 @@ def load_retriever():
     Caches the retriever to avoid reloading on every interaction.
     """
     if not os.path.exists(INDEX_PATH):
-        st.error(f"ChromaDB index not found at '{INDEX_PATH}'. Please run `build_index.py` first.")
+        st.error(f"ChromaDB index not found at '{INDEX_PATH}'. Please run a script to build it first.")
         return None
     
     try:
-        print("Loading ChromaDB index...")
         embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
-        
-        # Load the persisted database from disk
-        vector_store = Chroma(
-            persist_directory=INDEX_PATH, 
-            embedding_function=embeddings
-        )
-        
-        print("ChromaDB index loaded successfully.")
+        vector_store = Chroma(persist_directory=INDEX_PATH, embedding_function=embeddings)
         return vector_store.as_retriever()
     except Exception as e:
         st.error(f"Failed to load the ChromaDB index. Error: {e}")
         return None
 
 # --- HELPER FUNCTIONS ---
-def stream_chat(chat_messages):
-    """A generator function to stream responses from Ollama."""
-    try:
-        stream = client.chat(
-            model='llama3',
-            messages=chat_messages,
-            stream=True
-        )
-        for chunk in stream:
-            yield chunk['message']['content']
-    except ResponseError as e:
-        st.error(f"Ollama model error. Is the model name correct? Details: {e.error}")
-    except Exception as e:
-        st.error(f"An unexpected error occurred: {e}")
-
 def format_chat_history(messages):
-    """Formats the chat history into a readable string for saving."""
+    """
+    Formats the chat history into a readable string for saving.
+    This version is hardened to prevent errors from non-string content.
+    """
     formatted_text = ""
     for message in messages:
-        if message["role"] == "system":
+        if message.get("role") == "system":
             continue
-        role = "You" if message["role"] == "user" else "Assistant"
-        formatted_text += f"**{role}:**\n{message['content']}\n\n---\n\n"
+        
+        content = str(message.get("content", ""))
+        role = "You" if message.get("role") == "user" else "Assistant"
+        formatted_text += f"**{role}:**\n{content}\n\n---\n\n"
+        
     return formatted_text
 
 # --- SESSION STATE INITIALIZATION ---
@@ -100,31 +83,24 @@ st.session_state.make = st.sidebar.text_input("Make", value=st.session_state.mak
 st.session_state.model = st.sidebar.text_input("Model", value=st.session_state.model)
 st.session_state.serial_number = st.sidebar.text_input("Serial Number", value=st.session_state.serial_number)
 
-st.sidebar.title("Actions")
-
-# ---KNOWLEDGE BASE---
 st.sidebar.title("📚 Knowledge Base")
 if st.session_state.retriever:
     st.sidebar.success("Knowledge base loaded successfully.")
 else:
-    st.sidebar.error("Knowledge base not loaded. Please build the index.")
+    st.sidebar.error("Knowledge base not loaded.")
 
 st.sidebar.title("Actions")
-
-# --- NEW CHAT BUTTON ---
 if st.sidebar.button("✨ New Chat"):
-    # Reset the chat history and device info
     st.session_state.messages = [{"role": "system", "content": BASE_SYSTEM_PROMPT}]
     st.session_state.make = ""
     st.session_state.model = ""
     st.session_state.serial_number = ""
     st.rerun()
 
-# Check if the conversation has started
 is_chat_started = len(st.session_state.messages) > 1
-
-# Save Chat button
 chat_text_to_save = format_chat_history(st.session_state.messages)
+
+# --- CORRECTED WIDGETS ---
 st.sidebar.download_button(
     label="💾 Save Chat",
     data=chat_text_to_save,
@@ -133,7 +109,6 @@ st.sidebar.download_button(
     disabled=not is_chat_started
 )
 
-# Print Chat button
 disabled_attr = "disabled" if not is_chat_started else ""
 disabled_style = "cursor: not-allowed; opacity: 0.5;" if not is_chat_started else ""
 print_js = f"""
@@ -159,23 +134,49 @@ for message in st.session_state.messages:
 
 # --- USER INPUT AND CHAT LOGIC ---
 if user_question := st.chat_input("Ask me a question..."):
+    if not st.session_state.retriever:
+        st.error("Knowledge base is not loaded. Cannot answer questions.")
+        st.stop()
+        
     st.session_state.messages.append({"role": "user", "content": user_question})
     with st.chat_message("user"):
         st.markdown(user_question)
 
-    messages_for_model = list(st.session_state.messages)
-    
-    device_context = ""
-    if st.session_state.make: device_context += f"Make: {st.session_state.make}. "
-    if st.session_state.model: device_context += f"Model: {st.session_state.model}. "
-    if st.session_state.serial_number: device_context += f"Serial Number: {st.session_state.serial_number}."
-
-    if device_context:
-        full_system_prompt = f"{BASE_SYSTEM_PROMPT}\n\nCONTEXT: The user is asking about a specific device. Use these details in your response: {device_context}"
-        messages_for_model[0] = {"role": "system", "content": full_system_prompt}
-
     with st.chat_message("assistant"):
-        full_response = st.write_stream(stream_chat(messages_for_model))
+        with st.spinner("Searching knowledge base..."):
+            retrieved_docs = st.session_state.retriever.invoke(user_question)
+            context = "\n\n".join([doc.page_content for doc in retrieved_docs])
 
-    st.session_state.messages.append({"role": "assistant", "content": full_response})
-    st.rerun()
+        with st.spinner("Thinking..."):
+            device_context = ""
+            if st.session_state.make: device_context += f"Make: {st.session_state.make}. "
+            if st.session_state.model: device_context += f"Model: {st.session_state.model}. "
+            if st.session_state.serial_number: device_context += f"Serial Number: {st.session_state.serial_number}."
+            
+            rag_prompt = f"""
+            {BASE_SYSTEM_PROMPT}
+            
+            Device Context: {device_context}
+            
+            Use the following retrieved context from the knowledge base to answer the user's question. If the context doesn't contain the answer, say you're not sure.
+            
+            --- CONTEXT ---
+            {context}
+            --- END CONTEXT ---
+            
+            User Question: {user_question}
+            """
+            
+            messages_for_model = [{"role": "system", "content": rag_prompt}]
+
+            def stream_generator():
+                """A generator that yields chunks and builds the full response."""
+                full_response = ""
+                stream = client.chat(model='llama3', messages=messages_for_model, stream=True)
+                for chunk in stream:
+                    content = chunk['message']['content']
+                    full_response += content
+                    yield content
+                st.session_state.messages.append({"role": "assistant", "content": full_response})
+
+            st.write_stream(stream_generator)

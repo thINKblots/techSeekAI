@@ -1,147 +1,167 @@
 import streamlit as st
 import streamlit.components.v1 as components
-from groq import Groq # Replaced 'ollama' with 'groq'
-import langchain
-import langchain_community
 import os
+from groq import Groq
+from langchain_groq import ChatGroq
+from langchain.chains import create_retrieval_chain
+from langchain.chains.combine_documents import create_stuff_documents_chain
+from langchain.chains import create_history_aware_retriever # New import for conversation
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain_core.messages import AIMessage, HumanMessage
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_community.embeddings import HuggingFaceEmbeddings
-from langchain_community.vectorstores import Chroma # Changed from FAISS
-from langchain_community.chains import ConversationalRetrievalChain
-from langchain_community.llms import HuggingFaceHub
+from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_community.vectorstores import Chroma
 from langchain_community.document_loaders import PyPDFLoader
-from langchain_community.memory import ConversationBufferMemory
+# No longer need ConversationBufferMemory, we will manage history manually
 
 # --- APP CONFIGURATION ---
 st.set_page_config(page_title="TechSeek AI Agent", page_icon="🤖", layout="centered")
 st.title("🤖 TechSeek AI Agent")
 
-# --- SYSTEM PROMPT DEFINITION ---
-BASE_SYSTEM_PROMPT = """
-You are a senior equipment service advisor for a large equipment rental company and you've been tasked with training and supporting junior-level service technicians with troubleshooting.
-You have access to a knowledge base of equipment service manuals and technical documents to help you answer questions.
-Keep your responses concise and under 150 words and use text directly from the manuals. Break your responses into steps and require user input between them, as necessary, and ask the user clarifying questions or follow-ups at each step as necessary. 
-Respond to the topic at a high school graduate reading level. Cite primary sources for the information you provide.
-If you are unsure about an answer, respond with "I'm not sure about that. My knowledge base is currently limited." and avoid making up information or gathering information from the general internet.
-"""
+# --- PATHS & CONSTANTS ---
+PDF_DOCS_PATH = "docs"
+CHROMA_DB_PATH = "./chroma_db"
+# (Your BASE_SYSTEM_PROMPT remains the same)
+BASE_SYSTEM_PROMPT = """You are a senior equipment service advisor for a large equipment rental company and you've been tasked with training and supporting junior-level service technicians with troubleshooting. You have access to a knowledge base of equipment service manuals and technical documents to help you answer questions. Keep your responses concise and under 150 words and use text directly from the manuals. Break your responses into steps and require user input between them, as necessary, and ask the user clarifying questions or follow-ups at each step as necessary. Respond to the topic at a high school graduate reading level. Cite primary sources for the information you provide. If you are unsure about an answer, respond with "I'm not sure about that. My knowledge base is currently limited." and avoid making up information or gathering information from the general internet."""
 
-# --- GROQ CLIENT INITIALIZATION --- (MODIFIED SECTION)
+# --- GROQ CLIENT INITIALIZATION ---
 try:
-    # Get the API key from Streamlit secrets
-    client = Groq(api_key=st.secrets["GROQ_API_KEY"])
+    groq_api_key = st.secrets["GROQ_API_KEY"]
 except Exception as e:
     st.error("Groq API key not found. Please add it to your Streamlit secrets.")
     st.stop()
 
-# --- HELPER FUNCTIONS ---
-def stream_chat(chat_messages):
-    """A generator function to stream responses from Groq.""" # (MODIFIED DOCSTRING)
-    try:
-        # Use the Groq client to stream responses
-        stream = client.chat.completions.create(
-            # The model name for Llama 3 70B on Groq
-            model="llama-3.3-70b-versatile", 
-            messages=chat_messages,
-            stream=True,
-        )
-        # Yield content from the streamed chunks
-        for chunk in stream:
-            content = chunk.choices[0].delta.content
-            if content:
-                yield content
-    except Exception as e:
-        st.error(f"An error occurred with the Groq API: {e}")
+# --- REFACTORED RAG PIPELINE SETUP FUNCTION (LCEL METHOD) ---
+@st.cache_resource
+def setup_rag_pipeline():
+    """
+    Sets up the RAG pipeline using the modern LCEL (LangChain Expression Language) approach.
+    """
+    # 1. Load and process documents (same as before)
+    documents = []
+    for file in os.listdir(PDF_DOCS_PATH):
+        if file.endswith(".pdf"):
+            pdf_path = os.path.join(PDF_DOCS_PATH, file)
+            loader = PyPDFLoader(pdf_path)
+            documents.extend(loader.load())
+    
+    text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+    text_chunks = text_splitter.split_documents(documents)
 
+    embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
+    vector_store = Chroma.from_documents(
+        documents=text_chunks, embedding=embeddings, persist_directory=CHROMA_DB_PATH
+    )
+    retriever = vector_store.as_retriever()
+    llm = ChatGroq(temperature=0, groq_api_key=groq_api_key, model_name="llama3-70b-8192")
+
+    # 2. Create a history-aware retriever
+    # This prompt helps the LLM rephrase the user's question to be standalone, using the chat history
+    contextualize_q_system_prompt = """Given a chat history and the latest user question which might reference context in the chat history, formulate a standalone question which can be understood without the chat history. Do NOT answer the question, just reformulate it if needed and otherwise return it as is."""
+    contextualize_q_prompt = ChatPromptTemplate.from_messages(
+        [
+            ("system", contextualize_q_system_prompt),
+            MessagesPlaceholder("chat_history"),
+            ("human", "{input}"),
+        ]
+    )
+    history_aware_retriever = create_history_aware_retriever(
+        llm, retriever, contextualize_q_prompt
+    )
+
+    # 3. Create the main question-answering prompt
+    qa_system_prompt = BASE_SYSTEM_PROMPT + """\n\nAnswer the user's question based on the context below:\n\n{context}"""
+    qa_prompt = ChatPromptTemplate.from_messages(
+        [
+            ("system", qa_system_prompt),
+            MessagesPlaceholder("chat_history"),
+            ("human", "{input}"),
+        ]
+    )
+    
+    # 4. Create the chain that combines documents into the prompt
+    question_answer_chain = create_stuff_documents_chain(llm, qa_prompt)
+
+    # 5. Create the final retrieval chain that connects everything
+    rag_chain = create_retrieval_chain(history_aware_retriever, question_answer_chain)
+    
+    return rag_chain
+
+# --- HELPER FUNCTIONS --- (Your existing function is fine)
 def format_chat_history(messages):
-    """Formats the chat history into a readable string for saving."""
     formatted_text = ""
     for message in messages:
-        if message["role"] == "system":
-            continue
-        role = "You" if message["role"] == "user" else "Assistant"
-        formatted_text += f"**{role}:**\n{message['content']}\n\n---\n\n"
+        if message["role"] == "system": continue
+        role = "You" if isinstance(message, HumanMessage) else "Assistant"
+        formatted_text += f"**{role}:**\n{message.content}\n\n---\n\n"
     return formatted_text
 
 # --- SESSION STATE INITIALIZATION ---
 if "messages" not in st.session_state:
-    st.session_state.messages = [{"role": "system", "content": BASE_SYSTEM_PROMPT}]
-if "make" not in st.session_state:
-    st.session_state.make = ""
-if "model" not in st.session_state:
-    st.session_state.model = ""
-if "serial_number" not in st.session_state:
-    st.session_state.serial_number = ""
+    st.session_state.messages = []
+if "conversation_chain" not in st.session_state:
+    st.session_state.conversation_chain = setup_rag_pipeline()
+if "make" not in st.session_state: st.session_state.make = ""
+if "model" not in st.session_state: st.session_state.model = ""
+if "serial_number" not in st.session_state: st.session_state.serial_number = ""
 
-# --- SIDEBAR UI ---
+# --- SIDEBAR UI --- (Your existing sidebar code is fine)
 st.sidebar.title("Device Information")
 st.session_state.make = st.sidebar.text_input("Make", value=st.session_state.make)
 st.session_state.model = st.sidebar.text_input("Model", value=st.session_state.model)
 st.session_state.serial_number = st.sidebar.text_input("Serial Number", value=st.session_state.serial_number)
-
 st.sidebar.title("Actions")
-
-# --- NEW CHAT BUTTON ---
 if st.sidebar.button("✨ New Chat"):
-    st.session_state.messages = [{"role": "system", "content": BASE_SYSTEM_PROMPT}]
+    st.session_state.messages = []
     st.session_state.make = ""
     st.session_state.model = ""
     st.session_state.serial_number = ""
+    # No need to re-init the chain, st.cache_resource handles it
     st.rerun()
 
-is_chat_started = len(st.session_state.messages) > 1
-
-# --- SAVE & PRINT BUTTONS ---
-chat_text_to_save = format_chat_history(st.session_state.messages)
-st.sidebar.download_button(
-    label="💾 Save Chat",
-    data=chat_text_to_save,
-    file_name="chat_history.md",
-    mime="text/markdown",
-    disabled=not is_chat_started,
-)
-
-disabled_attr = "disabled" if not is_chat_started else ""
-disabled_style = "cursor: not-allowed; opacity: 0.5;" if not is_chat_started else ""
-print_js = f"""
-<button {disabled_attr} onclick="window.parent.print()">🖨️ Print Chat</button>
-<style>
-button {{
-    display: inline-block; width: 100%; padding: 8px 16px; font-size: 16px;
-    font-weight: bold; text-align: center; color: #31333F;
-    background-color: #FFFFFF; border: 1px solid rgba(49, 51, 63, 0.2);
-    border-radius: 0.5rem; cursor: pointer; {disabled_style}
-}}
-button:hover {{ border-color: #FF4B4B; color: #FF4B4B; }}
-button:disabled:hover {{ border-color: rgba(49, 51, 63, 0.2); color: #31333F; }}
-</style>
-"""
-components.html(print_js, height=50)
-
-
 # --- DISPLAY CHAT HISTORY ---
+# Now we use the HumanMessage/AIMessage objects directly
 for message in st.session_state.messages:
-    if message["role"] != "system":
-        with st.chat_message(message["role"]):
-            st.markdown(message["content"])
+    role = "user" if isinstance(message, HumanMessage) else "assistant"
+    with st.chat_message(role):
+        st.markdown(message.content)
 
-# --- USER INPUT AND CHAT LOGIC ---
+# --- MODIFIED: USER INPUT AND RAG LOGIC (LCEL METHOD) ---
 if user_question := st.chat_input("Ask me a question..."):
-    st.session_state.messages.append({"role": "user", "content": user_question})
+    # Append user question as a HumanMessage object
+    st.session_state.messages.append(HumanMessage(content=user_question))
     with st.chat_message("user"):
         st.markdown(user_question)
 
-    messages_for_model = list(st.session_state.messages)
-    
-    device_context = ""
-    if st.session_state.make: device_context += f"Make: {st.session_state.make}. "
-    if st.session_state.model: device_context += f"Model: {st.session_state.model}. "
-    if st.session_state.serial_number: device_context += f"Serial Number: {st.session_state.serial_number}."
-
-    if device_context:
-        full_system_prompt = f"{BASE_SYSTEM_PROMPT}\n\nCONTEXT: The user is asking about a specific device. Use these details in your response: {device_context}"
-        messages_for_model[0] = {"role": "system", "content": full_system_prompt}
-
     with st.chat_message("assistant"):
-        full_response = st.write_stream(stream_chat(messages_for_model))
+        with st.spinner("Thinking..."):
+            # Construct device context
+            device_context = ""
+            if st.session_state.make: device_context += f"Make: {st.session_state.make}. "
+            if st.session_state.model: device_context += f"Model: {st.session_state.model}. "
+            if st.session_state.serial_number: device_context += f"Serial Number: {st.session_state.serial_number}."
+            
+            full_input = f"{user_question}\n\nDevice Context: {device_context}"
 
-    st.session_state.messages.append({"role": "assistant", "content": full_response})
+            # Invoke the chain with the new input structure
+            result = st.session_state.conversation_chain.invoke({
+                "input": full_input,
+                "chat_history": st.session_state.messages
+            })
+            response = result['answer']
+            source_documents = result.get('context', []) # 'context' holds the source docs
+
+            st.markdown(response)
+
+            if source_documents:
+                st.markdown("---")
+                st.markdown("**Sources:**")
+                for doc in source_documents:
+                    source_file = os.path.basename(doc.metadata.get('source', 'Unknown'))
+                    page_number = doc.metadata.get('page', 'N/A')
+                    if isinstance(page_number, int):
+                        page_number += 1 # PDF pages are 0-indexed
+                    st.markdown(f"- {source_file}, page {page_number}")
+
+    # Append assistant response as an AIMessage object
+    st.session_state.messages.append(AIMessage(content=response))
